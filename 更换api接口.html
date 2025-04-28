@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>股票持仓助手（雪球API版）</title>
+    <style>
+        body { font-family: "Microsoft YaHei", Arial, sans-serif; margin: 30px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 20px;}
+        th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: center; }
+        th { background: #f5f5f5; }
+        tfoot td { font-weight: bold; background: #eef; }
+        input[type='number'] { width: 70px; }
+        input[type='text'] { width: 90px; }
+        button { margin: 0 2px; }
+        .del-btn { color: #fff; background: #d9534f; border: none; padding: 2px 7px; border-radius: 3px;}
+        .del-btn:hover { background: #c9302c;}
+    </style>
+</head>
+<body>
+    <h2>股票持仓助手（雪球API版）</h2>
+    <div>
+        <form id="addForm" onsubmit="return false;">
+            新增股票代码（如sh600000或hk00916）：<input type="text" id="newStock" required pattern="^(sh|sz|hk)\d{6}$">
+            <button type="button" onclick="addStock()">添加</button>
+        </form>
+    </div>
+    <div>
+        HKD→CNY(港币兑人民币汇率): <input type="number" step="0.0001" id="hkRate" value="0.92">
+        <button onclick="saveRate()">保存汇率并刷新</button>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>股票代码</th>
+                <th>名称</th>
+                <th>市场</th>
+                <th>最新价</th>
+                <th>持股数量</th>
+                <th>成本</th>
+                <th>持仓金额</th>
+                <th>盈亏</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody id="stockBody">
+            <!-- 动态内容 -->
+        </tbody>
+        <tfoot>
+            <tr>
+                <td colspan="6">合计（折合人民币）</td>
+                <td id="totalAmount"></td>
+                <td id="totalProfit"></td>
+                <td></td>
+            </tr>
+        </tfoot>
+    </table>
+<script>
+const API_BASE = "https://stock.xueqiu.com/v5/stock/quote.json?symbol=";
+// 默认股票
+const DEFAULT_STOCKS = ["sh600000", "sh600795", "hk00916", "hk09988", "hk00357", "hk02099"];
+// API前缀映射
+function toApiSymbol(code){
+    code = code.toLowerCase();
+    if(code.startsWith('sh')) return "SH"+code.slice(2);
+    if(code.startsWith('sz')) return "SZ"+code.slice(2);
+    if(code.startsWith('hk')) return "HK"+code.slice(2);
+    return code.toUpperCase();
+}
+function getMarket(symbol){
+    if(symbol.startsWith('SH') || symbol.startsWith('SZ')) return {market: "A股", currency: "CNY"};
+    if(symbol.startsWith('HK')) return {market: "H股", currency: "HKD"};
+    return {market: "-", currency: "-"};
+}
+// 本地存储
+function get(key, def){ let val=localStorage.getItem(key); return val ? JSON.parse(val) : def; }
+function set(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
+function getStocks() { return get("myStocks2", DEFAULT_STOCKS); }
+function setStocks(list) { set("myStocks2", list); }
+function getPositions() { return get("myPositions2", {}); }
+function setPositions(obj) { set("myPositions2", obj); }
+function getRate() { return parseFloat(localStorage.getItem("hkRate2")) || 0.92; }
+function setRate(val) { localStorage.setItem("hkRate2", val); }
+// 添加股票
+function addStock() {
+    let code = document.getElementById("newStock").value.trim().toLowerCase();
+    if(!/^(sh|sz|hk)\d{6}$/.test(code)) { alert("格式错误!"); return;}
+    let stocks = getStocks();
+    if(stocks.includes(code)) { alert("已存在!"); return;}
+    stocks.push(code);
+    setStocks(stocks);
+    render();
+    document.getElementById("newStock").value = "";
+}
+// 删除股票
+function delStock(code){
+    let stocks = getStocks().filter(s=>s!==code);
+    setStocks(stocks);
+    let pos = getPositions();
+    delete pos[code];
+    setPositions(pos);
+    render();
+}
+// 持仓输入
+function updatePosition(code, field, value){
+    let pos = getPositions();
+    if(!pos[code]) pos[code] = {amount: 0, cost: 0};
+    if(field=="amount") pos[code].amount = parseFloat(value) || 0;
+    if(field=="cost") pos[code].cost = parseFloat(value) || 0;
+    setPositions(pos);
+    render(false); // 仅刷新表格，无需再查API
+}
+// 汇率
+function saveRate(){
+    let rate = parseFloat(document.getElementById("hkRate").value);
+    if(isNaN(rate) || rate<=0) { alert("输入正确的汇率"); return;}
+    setRate(rate);
+    render(false);
+}
+// 雪球接口拉取价格
+async function fetchPrices(symbols){
+    if(symbols.length==0) return {};
+    let apiSymbols = symbols.map(toApiSymbol);
+    let url = API_BASE + apiSymbols.join(",");
+    let resp;
+    try {
+        resp = await fetch(url, {
+            headers: {
+                'Referer': 'https://xueqiu.com/',
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        });
+    } catch(e){
+        alert("无法连接雪球API，可能被CORS限制。请用本地服务器或CORS插件运行。");
+        return {};
+    }
+    let data = await resp.json();
+    if(!data.data || !data.data.quotes) return {};
+    // 转为映射
+    let map = {};
+    for(const quote of data.data.quotes){
+        let code = quote.symbol;
+        map[code] = quote;
+    }
+    return map;
+}
+// 主渲染
+async function render(fetchNewPrice=true){
+    let stocks = getStocks();
+    if(stocks.length==0) return document.getElementById("stockBody").innerHTML = "";
+    let pos = getPositions(), rate = getRate();
+    document.getElementById("hkRate").value = rate;
+    let prices = {};
+    let codeMap = {}; // apiSymbol: user输入symbol
+    let apiSymbols = stocks.map(function(code){
+        let apiSymbol = toApiSymbol(code);
+        codeMap[apiSymbol] = code;
+        return apiSymbol;
+    });
+    if(fetchNewPrice){
+        prices = await fetchPrices(stocks);
+        // 存一份最新价
+        for(let apiSymbol in prices){
+            let userSymbol = codeMap[apiSymbol];
+            let price = prices[apiSymbol]?.current;
+            if(price !== undefined) localStorage.setItem("price2_"+userSymbol, price);
+        }
+    }else{
+        for(let code of stocks){
+            prices[toApiSymbol(code)] = prices[toApiSymbol(code)] || {};
+            prices[toApiSymbol(code)].current = localStorage.getItem("price2_"+code) || "";
+        }
+    }
+    // 生成表格
+    let html = "", totalAmount=0, totalProfit=0;
+    for(let code of stocks){
+        let apiSymbol = toApiSymbol(code);
+        let quote = prices[apiSymbol] || {};
+        let name = quote.name || "";
+        let lastPrice = parseFloat(quote.current) || parseFloat(localStorage.getItem("price2_"+code)) || 0;
+        let {market, currency} = getMarket(apiSymbol);
+        let amount = (pos[code]?.amount)||0;
+        let cost = (pos[code]?.cost)||0;
+        // 持仓金额
+        let holding = lastPrice*amount;
+        // 盈亏
+        let profit = (lastPrice-cost)*amount;
+        // 本币→人民币
+        let holdingCNY = currency=="CNY" ? holding : holding*rate;
+        let profitCNY = currency=="CNY" ? profit : profit*rate;
+        totalAmount += holdingCNY;
+        totalProfit += profitCNY;
+        // 货币符号
+        let currSign = currency=="CNY"?"¥":"HK$";
+        // 行
+        html += `<tr>
+            <td>${code}</td>
+            <td>${name}</td>
+            <td>${market}</td>
+            <td>${lastPrice?(currSign+lastPrice.toFixed(3)):"-"}</td>
+            <td><input type="number" min="0" step="1" value="${amount}" onchange="updatePosition('${code}','amount',this.value)"></td>
+            <td><input type="number" step="0.0001" value="${cost}" onchange="updatePosition('${code}','cost',this.value)"></td>
+            <td>${lastPrice? (currSign+(holding.toFixed(2))) : "-" }</td>
+            <td>${lastPrice? (currSign+(profit.toFixed(2))) : "-" }</td>
+            <td><button class="del-btn" onclick="delStock('${code}')">删除</button></td>
+        </tr>`;
+    }
+    document.getElementById("stockBody").innerHTML = html;
+    document.getElementById("totalAmount").innerText = "¥"+totalAmount.toFixed(2);
+    document.getElementById("totalProfit").innerText = "¥"+totalProfit.toFixed(2);
+}
+// 页面初始化
+window.onload = ()=>{ render(); }
+// 刷新价格按钮
+let btn = document.createElement('button');
+btn.innerText = "获取最新价格";
+btn.onclick = ()=>render(true);
+document.querySelector('h2').after(btn);
+
+</script>
+</body>
+</html>
