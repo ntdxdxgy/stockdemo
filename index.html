@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>雪球多股持仓盈亏表</title>
+    <style>
+        body { font-family: "微软雅黑", Arial, sans-serif; margin: 30px; }
+        h2 { margin-bottom: 10px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 15px; }
+        th, td { border: 1px solid #ccc; padding: 6px 12px; text-align: center; }
+        th { background: #f0f0f0; }
+        tr.summary { background: #e7faf5; font-weight: bold; }
+        tr.stock-row:hover { background: #f5f5ff; }
+        input[type="number"], input[type="text"] { width: 90px; }
+        .btn { padding: 3px 10px; margin: 0 2px; border-radius: 3px; border: 1px solid #aaa; background: #f4f4f4; cursor: pointer;}
+        .btn:hover { background: #e0e0e0;}
+        .warn { color: #d33; }
+        .success { color: #3a6c3a; }
+        .rate-block { margin: 15px 0 10px 0; }
+    </style>
+</head>
+<body>
+<h2>雪球多股持仓盈亏表</h2>
+
+<div>
+    <label>新增股票(格式: sh600000 或 hk09988)：</label>
+    <input type="text" id="newStockInput" placeholder="如hk09988">
+    <button class="btn" onclick="addStock()">新增</button>
+    <span id="addWarn" class="warn"></span>
+</div>
+
+<div class="rate-block">
+    <label>港币兑人民币汇率：</label>
+    <input type="number" id="hkdRateInput" step="0.0001" style="width:80px;">
+    <button class="btn" onclick="refreshTable()">刷新汇率并更新表格</button>
+    <span style="color:#666;">（如 0.92，表示1港币=0.92人民币）</span>
+</div>
+
+<table id="stockTable">
+    <thead>
+        <tr>
+            <th>股票代码</th>
+            <th>名称</th>
+            <th>市场</th>
+            <th>最新价</th>
+            <th>货币</th>
+            <th>持股数量</th>
+            <th>成本</th>
+            <th>持仓金额</th>
+            <th>盈亏</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody id="stockTbody"></tbody>
+    <tfoot>
+        <tr class="summary">
+            <td colspan="6">合计（人民币）</td>
+            <td id="sumCost"></td>
+            <td id="sumValue"></td>
+            <td id="sumProfit"></td>
+            <td></td>
+        </tr>
+    </tfoot>
+</table>
+
+<script>
+// --------- 配置与数据 ---------
+const STOCKS_KEY = 'my_stock_list_v1';
+const DATA_KEY = 'my_stock_data_v1';
+const RATE_KEY = 'my_hkd_rate_v1';
+const DEFAULT_STOCKS = ["sh600795", "hk00916", "hk09988", "hk00357", "hk02099"];
+const A_STOCK_PREFIX = /^sh|sz/i;
+const H_STOCK_PREFIX = /^hk/i;
+
+// --------- 工具函数 ---------
+function getMarket(symbol) {
+    if (A_STOCK_PREFIX.test(symbol)) return "A股";
+    if (H_STOCK_PREFIX.test(symbol)) return "H股";
+    return "未知";
+}
+function getCurrency(market) {
+    if (market === "A股") return "CNY";
+    if (market === "H股") return "HKD";
+    return "";
+}
+function fmt(n, d=2) { return (n==null||isNaN(n)) ? "-" : parseFloat(n).toFixed(d); }
+function fmtCNY(n) { return "￥" + fmt(n,2); }
+function fmtHKD(n) { return "HK$" + fmt(n,2); }
+function toCNY(val, currency, hkdRate) {
+    if (currency === "CNY") return val;
+    if (currency === "HKD") return val * hkdRate;
+    return 0;
+}
+
+// --------- 本地数据管理 ---------
+function getStocks() {
+    let arr = JSON.parse(localStorage.getItem(STOCKS_KEY) || "null");
+    if (!arr) arr = DEFAULT_STOCKS.slice();
+    return arr;
+}
+function setStocks(arr) {
+    localStorage.setItem(STOCKS_KEY, JSON.stringify(arr));
+}
+function getData() {
+    let obj = JSON.parse(localStorage.getItem(DATA_KEY) || "{}");
+    return obj;
+}
+function setData(obj) {
+    localStorage.setItem(DATA_KEY, JSON.stringify(obj));
+}
+function getRate() {
+    let rate = parseFloat(localStorage.getItem(RATE_KEY));
+    return isNaN(rate) ? 0.92 : rate; // 默认0.92
+}
+function setRate(rate) {
+    localStorage.setItem(RATE_KEY, rate);
+}
+
+// --------- 股票行渲染 ---------
+function renderTable(quotes) {
+    let stocks = getStocks();
+    let data = getData();
+    let hkdRate = getRate();
+    document.getElementById('hkdRateInput').value = hkdRate;
+    let tbody = document.getElementById('stockTbody');
+    tbody.innerHTML = '';
+    let sumCost = 0, sumValue = 0, sumProfit = 0;
+    stocks.forEach((code, idx) => {
+        let q = quotes[code] || {};
+        let dat = data[code] || {};
+        let market = getMarket(code);
+        let currency = q.currency || getCurrency(market);
+        let price = q.current;
+        let name = q.name || '';
+        let qty = Number(dat.qty)||0, cost = Number(dat.cost)||0;
+        let value = (price && qty) ? price * qty : 0;
+        let costAmt = (cost && qty) ? cost * qty : 0;
+        let profit = (value && costAmt) ? value - costAmt : 0;
+        // 汇总转换为人民币
+        let cnyValue = toCNY(value, currency, hkdRate);
+        let cnyCost = toCNY(costAmt, currency, hkdRate);
+        let cnyProfit = toCNY(profit, currency, hkdRate);
+        sumCost += cnyCost;
+        sumValue += cnyValue;
+        sumProfit += cnyProfit;
+        // 渲染
+        let tr = document.createElement('tr');
+        tr.className = 'stock-row';
+        tr.innerHTML = `
+            <td>${code.toUpperCase()}</td>
+            <td>${name||"-"}</td>
+            <td>${market}</td>
+            <td>${fmt(price)}</td>
+            <td>${currency}</td>
+            <td>
+                <input type="number" min="0" step="1" value="${qty||''}" style="width:60px" onchange="updateQty('${code}',this.value)">
+            </td>
+            <td>
+                <input type="number" min="0" step="0.0001" value="${cost||''}" style="width:70px" onchange="updateCost('${code}',this.value)">
+            </td>
+            <td>
+                ${fmt(value)} ${currency}
+            </td>
+            <td>
+                <span style="color:${profit>=0?'#297b29':'#c00'}">${fmt(profit)} ${currency}</span>
+            </td>
+            <td>
+                <button class="btn" onclick="removeStock('${code}')">删除</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+    // 汇总行
+    document.getElementById('sumCost').textContent = fmt(sumCost);
+    document.getElementById('sumValue').textContent = fmt(sumValue);
+    document.getElementById('sumProfit').textContent = fmt(sumProfit);
+}
+
+// --------- 保存本地输入 ---------
+function updateQty(code, val) {
+    let data = getData();
+    if (!data[code]) data[code] = {};
+    data[code].qty = Number(val)||0;
+    setData(data);
+    refreshTable();
+}
+function updateCost(code, val) {
+    let data = getData();
+    if (!data[code]) data[code] = {};
+    data[code].cost = Number(val)||0;
+    setData(data);
+    refreshTable();
+}
+
+// --------- 新增/删除 ---------
+function addStock() {
+    let inp = document.getElementById('newStockInput');
+    let code = inp.value.trim().toLowerCase();
+    let warn = document.getElementById('addWarn');
+    warn.textContent = "";
+    if (!/^((sh|sz)\d{6}|hk\d{5})$/.test(code)) {
+        warn.textContent = "格式错误，请输入sh600000或hk09988";
+        return;
+    }
+    let stocks = getStocks();
+    if (stocks.includes(code)) {
+        warn.textContent = "已存在该股票";
+        return;
+    }
+    stocks.push(code);
+    setStocks(stocks);
+    inp.value = "";
+    refreshTable();
+}
+function removeStock(code) {
+    let stocks = getStocks();
+    stocks = stocks.filter(s=>s!==code);
+    setStocks(stocks);
+    refreshTable();
+}
+
+// --------- 汇率输入 ---------
+document.getElementById('hkdRateInput').addEventListener('change', function(){
+    let val = parseFloat(this.value);
+    if (val>0) setRate(val);
+});
+
+// --------- 网络请求 ---------
+async function fetchQuotes() {
+    let stocks = getStocks();
+    if (stocks.length===0) return {};
+    // 按市场分组，雪球API同市场可批量查
+    let ash = stocks.filter(c=>/^sh|sz/i.test(c));
+    let hks = stocks.filter(c=>/^hk/i.test(c));
+    let all = [];
+    if (ash.length) all.push({market:"CN", list: ash});
+    if (hks.length) all.push({market:"HK", list: hks});
+    let quotes = {};
+    for (let part of all) {
+        let syms = part.list.map(s=>s.toUpperCase()).join(",");
+        let url = "https://stock.xueqiu.com/v5/stock/quote.json?symbol=" + syms;
+        try {
+            let resp = await fetch(url, {headers:{'Referer':'https://xueqiu.com/'}});
+            let json = await resp.json();
+            // API返回单只/多只格式不一样
+            if (Array.isArray(json.data.quotes)) {
+                for (let q of json.data.quotes) {
+                    quotes[q.symbol.toLowerCase()] = q;
+                }
+            } else if (json.data.quote && part.list.length===1) {
+                quotes[json.data.quote.symbol.toLowerCase()] = json.data.quote;
+            }
+        } catch (e) {
+            // 网络错误等
+        }
+    }
+    return quotes;
+}
+
+// --------- 主渲染逻辑 ---------
+async function refreshTable() {
+    // 先保存汇率
+    let rate = parseFloat(document.getElementById('hkdRateInput').value);
+    if (rate>0) setRate(rate);
+    let tbody = document.getElementById('stockTbody');
+    tbody.innerHTML = '<tr><td colspan="10">正在加载行情数据...</td></tr>';
+    let quotes = await fetchQuotes();
+    renderTable(quotes);
+}
+
+// --------- 首次加载 ---------
+window.onload = function(){
+    // 初始化汇率和表
+    if (!localStorage.getItem(RATE_KEY)) setRate(0.92);
+    document.getElementById('hkdRateInput').value = getRate();
+    refreshTable();
+};
+</script>
+</body>
+</html>
